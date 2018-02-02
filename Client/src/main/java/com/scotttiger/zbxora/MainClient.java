@@ -11,6 +11,7 @@ import java.nio.file.Paths;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 
@@ -87,8 +88,20 @@ public class MainClient {
         Class.forName("oracle.jdbc.driver.OracleDriver");
         Connection connection = null;
         connection = DriverManager.getConnection("jdbc:oracle:thin:@" + db_url ,username,password);
-        
-        
+       
+        Statement sqlStatement = myConnection.createStatement();
+                    String readRecordSQL = "select substr(i.version,0,instr(i.version,'.')-1),\n" + 
+                    "                            s.sid, s.serial#, p.value instance_type, i.instance_name\n" + 
+                    "                            , s.username\n" + 
+                    "                            from v$instance i, v$session s, v$parameter p \n" + 
+                    "                            where s.sid = (select sid from v$mystat where rownum = 1)\n" + 
+                    "                            and p.name = 'instance_type'";  
+                    
+                    ResultSet myResultSet = sqlStatement.executeQuery(readRecordSQL);
+                    while (myResultSet.next()) {
+                        System.out.println("Record values: " + myResultSet.getString("WORK_ORDER_NO"));
+                    }
+                    myResultSet.close();
         
         connection.close();
     }
