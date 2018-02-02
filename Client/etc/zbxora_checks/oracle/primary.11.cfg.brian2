@@ -1,0 +1,404 @@
+#vim: syntax=sql
+[auto_discovery_1000]
+minutes: 1000
+expu.lld: select '' "{#PDB}", username "{#USERNAME}"
+            from dba_users s
+            where account_status IN ( 'OPEN', 'EXPIRED(GRACE)' )
+            and expiry_date > sysdate
+            and expiry_date < (sysdate + 30)
+ustat.lld: select '' "{#PDB}", account_status "{#STATUS}"
+            from dba_users
+            group by account_status
+
+dblog.lld: select distinct(trim(COMPONENT_ID)) "{#LOG_TYPE}", i.inst_name "{#PDB}" 
+	from V$DIAG_ALERT_EXT, 
+	(select inst_name from v$active_instances union select instance_name from gv$instance) i
+			
+[auto_discovery_60]
+minutes: 60
+inst.lld: select distinct inst_name "{#INST_NAME}"
+            from (select inst_name from v$active_instances 
+                  union
+                  select instance_name from gv$instance)
+db.lld: select DB_UNIQUE_NAME "{#PDB}" from v$database
+parm.lld: select i.instance_name "{#INST_NAME}", p.name "{#PARAMETER}"
+            from gv$instance i, gv$parameter p
+            where i.instance_number = p.inst_id
+            and   p.type in (3,6) and p.isdefault = 'FALSE'
+
+p_ts.lld: select tablespace_name "{#TS_NAME}", i.inst_name "{#PDB}"
+            from dba_tablespaces,
+            (select inst_name from v$active_instances union select instance_name from gv$instance) i 
+            where contents = 'PERMANENT'
+t_ts.lld: select tablespace_name "{#TS_NAME}", i.inst_name "{#PDB}"
+            from dba_tablespaces,
+            (select inst_name from v$active_instances union select instance_name from gv$instance) i
+            where contents = 'TEMPORARY'
+u_ts.lld: select tablespace_name "{#TS_NAME}", i.inst_name "{#PDB}"
+            from dba_tablespaces,
+            (select inst_name from v$active_instances union select instance_name from gv$instance) i
+            where contents = 'UNDO'
+
+service.lld: select '' "{#PDB}", i.instance_name "{#INST_NAME}", s.name "{#SERVICE_NAME}"
+               from gv$services s join gv$instance i
+                 on (   s.inst_id = i.inst_id)
+rman.lld: select distinct(object_type) "{#OBJ_TYPE}" from v$rman_status where operation like 'BACKUP%'
+arl_dest.lld: select i.instance_name "{#INST_NAME}",d.dest_name "{#ARL_DEST}"
+            from gv$archive_dest d
+            , gv$instance i
+            , v$database db
+            where d.status != 'INACTIVE'
+            and   d.inst_id = i.inst_id
+            and   db.log_mode = 'ARCHIVELOG'
+
+[startup]
+minutes: 0
+version: select 'inst['||instance_name||',version]', version from gv$instance
+lastpatch: select  'db['||i.inst_name||',last_patch_hist]', ACTION||':'||NAMESPACE||':'||VERSION||':'||ID||':'||COMMENTS
+        from sys.registry$history,
+	    (select inst_name from v$active_instances union select instance_name from gv$instance) i
+        where action_time = (select max(action_time) from sys.registry$history)
+
+[checks_01m]
+minutes: 1
+inst.uptime: select 'inst['||instance_name||',uptime]' key,(sysdate -startup_time)*60*60*24 val from gv$instance
+db.openmode: select 'db['||DB_UNIQUE_NAME||',openstatus]', decode(open_mode,'MOUNTED',1,'READ ONLY',2,'READ WRITE',3,0) from v$database
+scn: select 'db['||DB_UNIQUE_NAME||',current_scn]', current_scn from v$database
+     union all
+     select 'db['||DB_UNIQUE_NAME||',delta_scn]', current_scn from v$database
+
+[checks_05m]
+minutes: 5
+parm.val:  select 'parm['||i.instance_name||','||p.name||',value]' key, p.value
+            from gv$instance i, gv$parameter p
+            where i.instance_number = p.inst_id
+            and   p.type in (3,6) and p.isdefault = 'FALSE'
+            and   upper(p.description) not like '%SIZE%'
+            union all
+            select 'parm['||i.instance_name||','||p.name||',size]' key, p.value
+            from gv$instance i, gv$parameter p
+            where i.instance_number = p.inst_id
+            and   p.type in (3,6) and p.isdefault = 'FALSE'
+            and   upper(p.description) like '%SIZE%'
+service.cnt: select 'service[,'||i.instance_name||','|| s.service_name||',sess]' ,count(*)
+               from gv$session s join gv$instance i
+                 on (   s.inst_id = i.inst_id)
+                 group by i.instance_name, s.service_name
+
+u_ts: SELECT 'u_ts['||i.inst_name||','||tablespace_name||','||
+           CASE
+             WHEN k = 1 THEN 'filesize]'
+             WHEN k = 2 THEN 'maxsize]'
+             WHEN k = 3 THEN 'usedbytes]'
+             WHEN k = 4 THEN 'pctused]'
+           END key
+  ,        CASE
+           WHEN k = 1 THEN file_size
+           WHEN k = 2 THEN file_max_size
+           WHEN k = 3 THEN file_size - file_free_space
+           WHEN k = 4 THEN ROUND(((file_size - file_free_space) / file_max_size)  * 100)
+           END value
+  FROM  (select inst_name from v$active_instances union select instance_name from gv$instance) i,
+        ( --
+         SELECT   t.tablespace_name
+         ,        SUM(f.bytes) file_size
+         ,        SUM(CASE
+                        WHEN f.autoextensible = 'NO'
+                        THEN f.bytes
+                        ELSE GREATEST(f.bytes, f.maxbytes)
+                      END) file_max_size
+         ,        SUM(NVL(( SELECT   SUM(a.bytes)
+                            FROM     dba_free_space a
+                            WHERE    a.tablespace_name = t.tablespace_name
+                            AND      a.file_id         = f.file_id
+                            AND      a.relative_fno    = f.relative_fno
+                          ), 0)) file_free_space
+         FROM     dba_tablespaces t
+         JOIN     dba_data_files f
+         ON     ( f.tablespace_name = t.tablespace_name )
+         WHERE    t.CONTENTS = 'UNDO'
+         GROUP BY t.tablespace_name
+       )
+  JOIN   ( SELECT LEVEL k FROM dual CONNECT BY LEVEL <= 4 ) k
+  ON     ( 1 = 1 )
+
+t_ts: select   't_ts['||i.inst_name||','||t.TABLESPACE||',filesize]', t.totalspace
+    from (select inst_name from v$active_instances union select instance_name from gv$instance) i,
+    (select   round (sum (d.bytes))  AS totalspace,
+                   round (sum ( case when maxbytes < bytes then bytes else maxbytes end)) max_bytes,
+									 d.tablespace_name tablespace
+              from dba_temp_files d
+          group by d.tablespace_name) t
+   union all
+   select   't_ts['||i.inst_name||','||t.TABLESPACE_name||',maxsize]', sum(maxbytes)
+        from (select inst_name from v$active_instances union select instance_name from gv$instance) i,
+        (select case when autoextensible = 'NO'
+                               then bytes
+                     else
+                      case when bytes > maxbytes
+                               then bytes
+                      else          maxbytes
+                      end
+                     end maxbytes, tablespace_name
+                from dba_temp_files) f
+            , dba_tablespaces t
+       where t.contents = 'TEMPORARY'
+         and  t.tablespace_name = f.tablespace_name
+       group by t.tablespace_name, i.inst_name
+  union all
+  select 't_ts['||i.inst_name||','||t.tablespace_name||',usedbytes]', nvl(sum(u.blocks*t.block_size),0) bytes
+    from (select inst_name from v$active_instances union select instance_name from gv$instance) i,
+    gv$sort_usage u right join
+       dba_tablespaces t
+           on ( u.tablespace = t.tablespace_name)
+             where   t.contents = 'TEMPORARY'
+               group by t.tablespace_name, i.inst_name
+  union all
+  select 't_ts['||i.inst_name||','||t.tablespace_name||',pctused]' key,used_percent 
+  from (select inst_name from v$active_instances union select instance_name from gv$instance) i,
+  dba_tablespace_usage_metrics t
+  join dba_tablespaces d on d.tablespace_name = t.tablespace_name
+  where d.contents = 'TEMPORARY'
+
+arl_dest: select 'arl_dest['|| i.instance_name||','||d.dest_name||',status]', ''||decode (d.status,'VALID',0,'DEFERRED',1,'ERROR',2,3)
+            from gv$archive_dest d
+            , gv$instance i
+            , v$database db
+            where d.status != 'INACTIVE'
+            and   d.inst_id = i.inst_id
+            and db.log_mode = 'ARCHIVELOG'
+          union all
+          select 'arl_dest['|| i.instance_name||','||d.dest_name||',sequence]', ''||d.log_sequence
+            from gv$archive_dest d
+            , gv$instance i
+            , v$database db
+            where d.status != 'INACTIVE'
+            and   d.inst_id = i.inst_id
+            and db.log_mode = 'ARCHIVELOG'
+          union all
+          select 'arl_dest['|| i.instance_name||','||d.dest_name||',error]', '"'||d.error||'"'
+            from gv$archive_dest d
+            , gv$instance i
+                , v$database db
+            where d.status != 'INACTIVE'
+            and   d.inst_id = i.inst_id
+            and db.log_mode = 'ARCHIVELOG'
+
+fra: select 'fra[limit]', space_limit from v$recovery_file_dest def
+      union all
+     select 'fra[used]', space_used from v$recovery_file_dest def
+      union all
+     select 'fra[reclaimable]', space_reclaimable from v$recovery_file_dest def
+      union all
+     select 'fra[files]', number_of_files from v$recovery_file_dest def
+
+[checks_20m]
+minutes: 20
+rman: with stats as (
+        select r.object_type, r.operation, r.start_time, r.end_time, r.status
+               ,max(start_time) over (partition by  r.object_type, r.operation) max_start
+               , input_bytes, output_bytes
+        from v$rman_status r
+        where r.row_type = 'COMMAND'
+        and   not r.object_type is null
+        and   r.operation like 'BACKUP%'
+        )
+        , types as (
+        select 'ARCHIVELOG' object_type from dual
+        union all
+        select 'CONTROLFILE' from dual
+        union all
+        select 'SPFILE' from dual
+        union all
+        select 'DB INCR' from dual
+        union all
+        select 'DATAFILE FULL' from dual
+        union all
+        select 'DB FULL' from dual
+        union all
+        select 'RECVR AREA' from dual
+        )
+        , data as (
+        select t.object_type, s.start_time, s.end_time, nvl(s.status,'noinfo') status, round(nvl((s.end_time - s.start_time),0)*24*60*60) elapsed
+        , nvl(input_bytes,0) input_bytes, nvl(output_bytes,0) output_bytes
+        from types t left outer join
+             stats s on (s.object_type = t.object_type)
+        where nvl(s.start_time,sysdate) = nvl(s.max_start,sysdate)
+        )
+        select '"rman['||object_type||',status]"', ''||decode(status,'COMPLETED',0,
+                                               'FAILED',   1,
+                                               'COMPLETED WITH WARNINGS',2,
+                                               'COMPLETED WITH ERRORS',  3,
+                                               'noinfo',                 4,
+                                               'RUNNING',                5,
+                                               9) status
+        from data
+        union all
+        select '"rman['||object_type||',ela]"',''||elapsed
+        from data
+        union all
+        select '"rman['||object_type||',input]"',''||input_bytes
+        from data
+        union all
+        select '"rman['||object_type||',output]"',''||output_bytes
+        from data
+        union all
+        select '"rman['||object_type||',age]"',''||round((sysdate - nvl(start_time,sysdate))*24*3600) age
+        from data
+        union all
+        select '"rman['||object_type||',time_start]"',''||to_char(start_time, 'YYYY-MM-DD HH24:MI:SS')
+        from data
+        union all
+        select '"rman['||object_type||',time_end]"',''||to_char(end_time, 'YYYY-MM-DD HH24:MI:SS')
+        from data
+        union all select 'rman[bct,status]', ''||decode(status,'ENABLED',0,'DISABLED',1,2) from v$block_change_tracking
+        union all select 'rman[bct,file]', filename from v$block_change_tracking
+        union all select 'rman[bct,bytes]', ''||nvl(bytes,0) from v$block_change_tracking
+
+
+processes: select 'db['||i.inst_name||',processes]' key, count(1) 
+		from v$resource_limit, 
+		(select inst_name from v$active_instances union select instance_name from gv$instance) i 
+		where resource_name = ('processes')
+		group by inst_name
+sessions: select 'db['||i.inst_name||',sessions]' key, count(1) 
+		from v$resource_limit,
+		(select inst_name from v$active_instances union select instance_name from gv$instance) i 
+		where resource_name = ('sessions')
+		group by inst_name
+
+[checks_60m]
+minutes: 60
+p_ts: select 'p_ts['||i.inst_name||','||t.tablespace_name||',filesize]' key, sum(f.bytes)
+        from (select inst_name from v$active_instances union select instance_name from gv$instance) i,
+        dba_data_files f, 
+        dba_tablespaces t
+       where t.contents = 'PERMANENT'
+         and t.tablespace_name = f.tablespace_name
+       group by t.tablespace_name, i.inst_name
+       union all
+       select 'p_ts['||i.inst_name||','||t.tablespace_name||',maxsize]' key, sum(f.maxbytes)
+        from (select inst_name from v$active_instances union select instance_name from gv$instance) i,
+        (select case when autoextensible = 'NO'
+                               then bytes
+                     else
+                      case when bytes > maxbytes
+                               then bytes
+                      else          maxbytes
+                      end
+                     end maxbytes, tablespace_name
+                from dba_data_files) f
+            , dba_tablespaces t
+       where t.contents = 'PERMANENT'
+         and  t.tablespace_name = f.tablespace_name
+       group by t.tablespace_name, i.inst_name
+       union all
+       select 'p_ts['||i.inst_name||','||t.tablespace_name||',usedbytes]' key, sum(f.file_size) - nvl(sum(a.free_bytes),0) usedbytes
+       from (select inst_name from v$active_instances union select instance_name from gv$instance) i,
+       (select tablespace_name, sum(bytes) file_size
+               from dba_data_files
+               group by tablespace_name
+            ) f
+        join dba_tablespaces t
+          on ( f.tablespace_name = t.tablespace_name)
+        left join (select tablespace_name, sum(bytes) free_bytes
+        from dba_free_space group by tablespace_name) a
+          on (    t.tablespace_name = a.tablespace_name
+              and f.tablespace_name = a.tablespace_name)
+        where t.contents = 'PERMANENT'
+        group by t.tablespace_name, i.inst_name
+       union all
+  	    select 'p_ts['||i.inst_name||','||t.tablespace_name||',pctused]' key,used_percent 
+        from (select inst_name from v$active_instances union select instance_name from gv$instance) i,
+        dba_tablespace_usage_metrics t
+	      join dba_tablespaces d on d.tablespace_name = t.tablespace_name
+	      where d.contents = 'PERMANENT'
+		
+expu: select 'expu[,'|| username||',expiring]' key, (expiry_date - sysdate)*24*3600 value
+	from dba_users s
+	where account_status IN ( 'OPEN', 'EXPIRED(GRACE)' )
+	and expiry_date > sysdate
+	and expiry_date < (sysdate + 30)
+  union all
+  select '"ustat[,'||account_status||',count]"' key, count(*) value
+  from dba_users
+  group by account_status
+
+dblog: select 'dblog['||i.inst_name||','||trim(COMPONENT_ID)||']' key,  ORIGINATING_TIMESTAMP||'mm'||PROBLEM_KEY||'mm'translate(REPLACE(REPLACE(REPLACE(SUBSTR(SUBSTR(MESSAGE_TEXT,INSTR(MESSAGE_TEXT,'incident=')),INSTR(SUBSTR(MESSAGE_TEXT,INSTR(MESSAGE_TEXT,'incident=')),':')+1),'[]','')))),REPLACE(REPLACE(PROBLEM_KEY,REPLACE(SUBSTR(PROBLEM_KEY,0,9),'[',''),''),' ',''),''),'[0]||[1]||[2]||[, ,||, ,||,',''), chr(10)||chr(11)||chr(13), '    ') value from V$DIAG_ALERT_EXT, (select inst_name from v$active_instances union select instance_name from gv$instance) i WHERE PROBLEM_KEY IS NOT NULL AND UPPER(MESSAGE_TEXT) LIKE '%'||UPPER(i.inst_name)||'%' and originating_timestamp > systimestamp - interval '61' minute
+
+[checks_720m]
+minutes: 720
+version: select 'inst['||instance_name||',version]', version from gv$instance
+lastpatch: select  'db['||i.inst_name||',last_patch_hist]', ACTION||':'||NAMESPACE||':'||VERSION||':'||ID||':'||COMMENTS
+		from sys.registry$history, 
+		(select inst_name from v$active_instances union select instance_name from gv$instance) i 
+		where action_time = (select max(action_time) from sys.registry$history)
+
+sga_buffer_cache: SELECT 'db['||i.inst_name||',sga_buffer_cache]' key,to_char(ROUND(SUM(decode(pool,NULL,decode(name,'db_block_buffers',(bytes)/(1024*1024),'buffer_cache',(bytes)/(1024*1024),0),0)),2)) sga_bufcache 
+				FROM V$SGASTAT, 
+				(select inst_name from v$active_instances union select instance_name from gv$instance) i
+				group by inst_name
+
+sga_fixed: SELECT 'db['||i.inst_name||',sga_fixed]' key,TO_CHAR(ROUND(SUM(decode(pool,NULL,decode(name,'fixed_sga',(bytes)/(1024*1024),0),0)),2)) sga_fixed 
+		FROM V$SGASTAT, 
+		(select inst_name from v$active_instances union select instance_name from gv$instance) i
+		group by inst_name
+
+sga_java_pool: SELECT 'db['||i.inst_name||',sga_java_pool]' key,to_char(ROUND(SUM(decode(pool,'java pool',(bytes)/(1024*1024),0)),2)) sga_jpool 
+			FROM V$SGASTAT, 
+			(select inst_name from v$active_instances union select instance_name from gv$instance) i
+			group by inst_name
+
+sga_large_pool: SELECT 'db['||i.inst_name||',sga_large_pool]' key,to_char(ROUND(SUM(decode(pool,'large pool',(bytes)/(1024*1024),0)),2)) sga_lpool 
+			FROM V$SGASTAT, 
+			(select inst_name from v$active_instances union select instance_name from gv$instance) i
+			group by inst_name
+
+sga_log_buffer: SELECT 'db['||i.inst_name||',sga_log_buffer]' key,TO_CHAR(ROUND(SUM(decode(pool,NULL,decode(name,'log_buffer',(bytes)/(1024*1024),0),0)),2)) sga_lbuffer 
+				FROM V$SGASTAT,
+				(select inst_name from v$active_instances union select instance_name from gv$instance) i
+				group by inst_name
+
+sga_shared_pool: SELECT 'db['||i.inst_name||',sga_shared_pool]' key, TO_CHAR(ROUND(SUM(decode(pool,'shared pool',decode(name,'library cache',0,'dictionary cache',0,'free memory',0,'sql area',0,(bytes)/(1024*1024)),0)),2)) pool_misc	
+				FROM V$SGASTAT,
+				(select inst_name from v$active_instances union select instance_name from gv$instance) i
+				group by inst_name
+
+[checks_15m]
+minutes: 15
+#invalid.total: select 'db[total]',count(1) from dba_objects where status = 'INVALID'
+invalid.user: select 'db['||i.inst_name||',owner]',owner||'.'||object_name||'.'||object_type 
+			from dba_objects,
+			(select inst_name from v$active_instances union select instance_name from gv$instance) i 
+			where status = 'INVALID'
+
+failed.jobs: select 'db['||i.inst_name||',failedjobs]',broken||','||failures||','||job||','||NEXT_DATE||','||LAST_DATE||','||LOG_USER 
+			from dba_jobs,
+			(select inst_name from v$active_instances union select instance_name from gv$instance) i 
+			where failures>0 and broken = 'N'
+
+failed.jobs.count: select 'db['||i.inst_name||',failedjobscount]',c.total 
+				from (select count(1) total from dba_jobs where failures>0 and broken = 'N') c,
+				(select inst_name from v$active_instances union select instance_name from gv$instance) i
+
+broken.jobs: select 'db['||i.inst_name||',brokenjobs]',broken||','||failures||','||job||','||NEXT_DATE||','||LAST_DATE||','||LOG_USER 
+			from dba_jobs,
+			(select inst_name from v$active_instances union select instance_name from gv$instance) i 
+			where broken = 'Y'
+
+broken.jobs.count: select 'db['||i.inst_name||',brokenjobscount]',c.total 
+				from (select count(1) total from dba_jobs where broken = 'Y') c,
+				(select inst_name from v$active_instances union select instance_name from gv$instance) i
+
+scheduler.jobs: SELECT 'db['||i.inst_name||',schldjobs]' key,JOB_NAME||','||STATE 
+				FROM DBA_SCHEDULER_JOBS,
+				(select inst_name from v$active_instances union select instance_name from gv$instance) i 
+				where state <> 'DISABLED'
+
+runschd.jobs: select 'db['||i.inst_name||',runschldjobs]' key,OWNER||','||JOB_NAME||','||JOB_SUBNAME||','||JOB_STYLE||','||ELAPSED_TIME 
+			FROM ALL_SCHEDULER_RUNNING_JOBS,
+			(select inst_name from v$active_instances union select instance_name from gv$instance) i
+
+blevel: select 'db['||i.inst_name||',blevel]' key,owner||'.'||index_name||','||blevel 
+		from sys.dba_indexes, (select inst_name from v$active_instances union select instance_name from gv$instance) i
+		where blevel >= 3

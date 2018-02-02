@@ -1,0 +1,9 @@
+# vim: syntax=sql
+[checks_60m]
+minutes: 60
+blevel: select 'db[blevel]' key,owner||'.'||index_name||','||blevel from sys.dba_indexes where blevel >= 3
+datafiles:select 'db[hotdatafiles]' key, tsname||','||name from ( select tsname,name, physical_reads, RANK() OVER (ORDER BY physical_reads desc ) rank from topdatafiles) where rank < 6
+[checks_15m]
+minutes: 15
+cursors: select 'db[cursors]' key, open_cursors from numcursors
+unusable: select 'db[unuseable]' key, owner||','||index_name from dba_indexes where status = 'UNUSABLE'
