@@ -12,15 +12,18 @@ import java.nio.file.Paths;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Timestamp;
 
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Formatter;
+import java.util.Date;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.apache.commons.io.FilenameUtils;
 
@@ -30,6 +33,12 @@ public class MainClient {
         super();
     }
 
+    /**
+     * @throws IniParserException
+     * @throws IOException
+     * @throws ClassNotFoundException
+     * @throws SQLException
+     */
     public static void main(String[] args) throws IniParserException, IOException, ClassNotFoundException,
                                                   SQLException {
         // Read from a file
@@ -65,39 +74,39 @@ public class MainClient {
     }
 
     private void siteChecks(Map<String, Map<String, String>> sections, String filename) throws ClassNotFoundException,
-                                                                                               SQLException {
-        List output = new ArrayList();
-        StringBuilder sbuf = new StringBuilder();
-        Formatter fmt = new Formatter(sbuf);
-        String dbVersion="", mySID="",  iType="", iName="", uName="", dbRole="", db_type="oracle";
-        Double  mySerial = 0d;
+                                                                                               SQLException,
+                                                                                               IOException,
+                                                                                               IniParserException {
+        List<String> output = new ArrayList();
+        String dbVersion = "", mySID = "", iType = "", iName = "", uName = "", dbRole = "", db_type = "oracle";
+        Double mySerial = 0d;
         Boolean i = false;
         String CHECKSFILE = "";
         Float sql_timeouts = 0f;
         Timestamp timestamp = new Timestamp(System.currentTimeMillis());
-        String site_checks = System.getProperty("user.dir") + "/" +sections.get("zbxora").get("site_checks");
-        output.add(fmt.format("%s site_checks: %s\n", timestamp.toString(), site_checks).toString());
+        String site_checks = System.getProperty("user.dir") + "/" + sections.get("zbxora").get("site_checks");
+        output.add(String.format("%s site_checks: %s\n", timestamp.toString(), site_checks).toString());
 
         String to_zabbix_method = sections.get("zbxora").get("to_zabbix_method");
         String to_zabbix_args = sections.get("zbxora").get("to_zabbix_args");
-        output.add(fmt.format("%s to_zabbix_method: %s %s\n", timestamp.toString(), to_zabbix_method, to_zabbix_args));
+        output.add(String.format("%s to_zabbix_method: %s %s\n", timestamp.toString(), to_zabbix_method, to_zabbix_args));
 
         String out_dir = sections.get("zbxora").get("out_dir");
         String db_url = sections.get("zbxora").get("db_url");
         String username = sections.get("zbxora").get("username");
         String password = sections.get("zbxora").get("password");
         String role = sections.get("zbxora").get("role");
-        String hostname = sections.get("zbxora").get("hostname");
+        String  hostname = sections.get("zbxora").get("hostname");
         String checks_dir = sections.get("zbxora").get("checks_dir");
 
         String outfile = out_dir + "/" + FilenameUtils.getBaseName(filename) + ",zbx";
-        output.add(fmt.format("%s out_file:%s\n", timestamp.toString(), outfile).toString());
-    
+        output.add(String.format("%s out_file:%s\n", timestamp.toString(), outfile).toString());
+
         Class.forName("oracle.jdbc.driver.OracleDriver");
-        
+
         Connection connection = null;
         connection = DriverManager.getConnection("jdbc:oracle:thin:@" + db_url, username, password);
-       
+
         Statement sqlStatement = connection.createStatement();
         String readRecordSQL =
             "select substr(i.version,0,instr(i.version,'.')-1),\n" +
@@ -117,70 +126,106 @@ public class MainClient {
             iName = myResultSet.getString(5);
             uName = myResultSet.getString(6);
         }
-               
-            //TODO Error handling of connection.
-        if (iType == "RDBMS"){
-                readRecordSQL  = "select database_role from v$database";
-        myResultSet = sqlStatement.executeQuery(readRecordSQL);
+
+        //TODO Error handling of connection.
+        if (iType.contains("RDBMS")) {
+            readRecordSQL = "select database_role from v$database";
+            myResultSet = sqlStatement.executeQuery(readRecordSQL);
             while (myResultSet.next()) {
                 dbRole = myResultSet.getString(1);
             }
+        } else {
+            dbRole = "asm";
         }
-                    else {
-                dbRole = "asm";
-                    }
-      
-        output.add("%s connected db_url %s " + db_url +
-              "type %s " + iType + 
-              "db_role %s " +dbRole + 
-              "version %s" + dbVersion +
-              "\n%s " + timestamp.toString() +
-              "user %s %s " + username +uName + 
-              "sid,serial %d,%d " +mySID + mySerial +
-              "instance %s " + iName + 
-              "as %s\n" +role +
-               "\n"  );             
-                
-        if (iType.contains("asm"))
-            CHECKSFILE = checks_dir+"/" + db_type  +"/" + dbRole + "." + dbVersion + ".cfg";
-        else if (dbRole.contains("PHYSICAL STANDBY"))
-            CHECKSFILE = checks_dir +"/" + db_type  + "/" + "dbRole" + "." + dbVersion +".cfg";
-        else
-            CHECKSFILE = checks_dir +"/" + db_type +"/" + dbRole + "." + dbVersion + ".cfg";
 
-        try{
-          sql_timeouts = Float.valueOf(sections.get("zbxora").get("sql_timeout"));
-        } catch(Exception ex){
-          sql_timeouts = 60f;      
+        output.add("%s connected db_url %s " + db_url + "type %s " + iType + "db_role %s " + dbRole + "version %s" +
+                   dbVersion + "\n%s " + timestamp.toString() + "user %s %s " + username + uName + "sid,serial %d,%d " +
+                   mySID + mySerial + "instance %s " + iName + "as %s\n" + role + "\n");
+
+        if (iType.contains("asm"))
+            CHECKSFILE = checks_dir + "/" + db_type + "/" + dbRole + "." + dbVersion + ".cfg";
+        else if (dbRole.contains("PHYSICAL STANDBY"))
+            CHECKSFILE = checks_dir + "/" + db_type + "/" + "dbRole" + "." + dbVersion + ".cfg";
+        else
+            CHECKSFILE = checks_dir + "/" + db_type + "/" + dbRole + "." + dbVersion + ".cfg";
+
+        try {
+            sql_timeouts = Float.valueOf(sections.get("zbxora").get("sql_timeout"));
+        } catch (Exception ex) {
+            sql_timeouts = 60f;
         }
-         output.add(String.format("%s using sql_timeout %s \n", timestamp.toString(), sql_timeouts));
-         
-         // starting the actual checks.
-         File f = new File(CHECKSFILE);
-         if(f.exists() && !f.isDirectory()) { 
-         output.add(fmt.format("%s using checkfile %s\n", timestamp.toString(), CHECKSFILE));
-         } else {
-             output.add(fmt.format("%s checkfile dont exists: %s\n", timestamp.toString(), CHECKSFILE));
-         }
-         
-         while (i != true) {
-             List<String> delim = Arrays.asList(":");
-             List<String> comment = Arrays.asList("#");
-             Ini ini =new Ini();
-             ini.setCommentPrefixes(comment);
-            try {
+        output.add(String.format("%s using sql_timeout %s \n", timestamp.toString(), sql_timeouts));
+
+        // starting the actual checks.
+        File f = new File(CHECKSFILE);
+        if (f.exists() && !f.isDirectory()) {
+            output.add(String.format("%s using checkfile %s\n", timestamp.toString(), CHECKSFILE));
+        } else {
+            output.add(String.format("%s checkfile dont exists: %s\n", timestamp.toString(), CHECKSFILE));
+        }
+        long startTime = System.currentTimeMillis();
+        long elapsedTime = 0L;
+        Arrays.asList(":");
+        List<String> comment = Arrays.asList("#");
+        Ini ini = new Ini();
+        ini.setCommentPrefixes(comment);
+
+        while (i != true) {
+            ini.read(f.toPath());
+            Map<String, Map<String, String>> sectionsTest = ini.getSections();
+            Set<String> valuesC = sectionsTest.keySet();
+            Iterator<String> values = valuesC.iterator();
+            while (values.hasNext()) {
+                String val = values.next();
+            //   System.out.println(val);
+                if (val.contains("discover")){
+                    Map<String, String> sec =  sectionsTest.get(val);
+                    Set<String> secC = sec.keySet();
+                    Iterator<String> secCc = secC.iterator();
+                    String res =hostname + " ";
+                    while (secCc.hasNext()) {
+                        String key = secCc.next();
+                   // System.out.println( sec.get(key));
+                     readRecordSQL =sec.get(key);
+                    readRecordSQL = readRecordSQL.replace("$$", "$");
+                        if(!sqlStatement.isClosed() && readRecordSQL.contains("select")){
+                            //try {
+                            ResultSet rs = sqlStatement.executeQuery(readRecordSQL);
+                        ResultSetMetaData rsmd = rs.getMetaData();
+
+                            while (rs.next()) {
+                            res = res + key + "";
+                                
+                                int rownum = rsmd.getColumnCount();
+                                for(int l=1; l <= rownum ;l++){
+                                    res= res + rs.getString(l);
+                                }
+                                System.out.println("Result " + res);
+                         //   }
+                        //} catch (SQLException sqle) {
+                            // TODO: Add catch code
+                          //  System.out.println(sqle);
+                        }
+                    }
+                }
+                }
+            }
+                /*   Iterator<Map<String,String>> values = valuesC.iterator();
+                while (values.hasNext()) {
                 
-                
-                ini.read(f.toPath());
-            
-            
-             Map<String, Map<String, String>> sectionsTest = ini.getSections(); 
-             sectionsTest.forEach( (k,v) -> System.out.println("Key: " + k + ": Value: " + v));
-                
-             } catch (IOException e) {
-                System.out.printf(e.toString());
-             }
-         }
+                    Map<String,String> value = values.next();
+                   Set<String> ke =  values.next().keySet();
+                    System.out.println( value.values());
+                } */
+
+                while (elapsedTime < 360000) {
+                // sections.get("zbxora").get("to_zabbix_method")
+                 //  String name= sectionsTest.toString();
+                    
+            }
+            elapsedTime = (new Date()).getTime() - startTime;
+        }
+
         connection.close();
     }
 
